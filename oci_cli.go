@@ -14,7 +14,12 @@ import (
 )
 
 func main() {
-	var rootCmd = &cobra.Command{Use: "oci-cli"}
+	var rootCmd = &cobra.Command{
+		Use: "oci-cli",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("Debug: Executing command: %s\n", cmd.CommandPath())
+		},
+	}
 
 	var instancesCmd = &cobra.Command{
 		Use:   "instances",
@@ -80,10 +85,89 @@ func main() {
 	var infoCmd = &cobra.Command{
 		Use:   "info",
 		Short: "Show information about a compute instance",
+		PreRun: func(cmd *cobra.Command, args []string) {
+			fmt.Println("Debug: About to run instances info command")
+		},
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("Info command not implemented yet")
+			idFlag, _ := cmd.Flags().GetString("id")
+			nameFlag, _ := cmd.Flags().GetString("name")
+			compartmentFlag, _ := cmd.Flags().GetString("compartment-id")
+			fmt.Printf("Debug: Flags retrieved - id='%s', name='%s', compartment-id='%s'\n", idFlag, nameFlag, compartmentFlag)
+			configProvider := common.DefaultConfigProvider()
+			fmt.Printf("Debug: Info command started with flags: id='%s', name='%s', compartment-id='%s'\n", idFlag, nameFlag, compartmentFlag)
+
+			if idFlag != "" && nameFlag != "" {
+				fmt.Println("Error: Specify either --id or --name, not both.")
+				os.Exit(1)
+			} else if idFlag != "" {
+				computeClient, err := core.NewComputeClientWithConfigurationProvider(configProvider)
+				if err != nil {
+					fmt.Printf("Error: Creating compute client failed: %v\n", err)
+					os.Exit(1)
+				}
+				request := core.GetInstanceRequest{InstanceId: &idFlag}
+				response, err := computeClient.GetInstance(context.Background(), request)
+				if err != nil {
+					fmt.Printf("Error: Getting instance by ID failed: %v\n", err)
+					os.Exit(1)
+				}
+				displayInstanceDetails(&response.Instance)
+			} else if nameFlag != "" {
+				var compartmentID string
+				if compartmentFlag == "" {
+					tenancyOCID, err := configProvider.TenancyOCID()
+					if err != nil {
+						fmt.Printf("Error: Getting tenancy OCID failed: %v\n", err)
+						os.Exit(1)
+					}
+					compartmentID = tenancyOCID
+				} else {
+					compartmentIDResolved, err := resolveCompartmentID(compartmentFlag)
+					if err != nil {
+						fmt.Printf("Error: Resolving compartment ID failed: %v\n", err)
+						os.Exit(1)
+					}
+					compartmentID = compartmentIDResolved
+				}
+
+				computeClient, err := core.NewComputeClientWithConfigurationProvider(configProvider)
+				if err != nil {
+					fmt.Printf("Error: Creating compute client failed: %v\n", err)
+					os.Exit(1)
+				}
+				listRequest := core.ListInstancesRequest{CompartmentId: &compartmentID}
+				listResponse, err := computeClient.ListInstances(context.Background(), listRequest)
+				if err != nil {
+					fmt.Printf("Error: Listing instances failed: %v\n", err)
+					os.Exit(1)
+				}
+				found := false
+				for _, instanceSummary := range listResponse.Items {
+					if *instanceSummary.DisplayName == nameFlag {
+						getRequest := core.GetInstanceRequest{InstanceId: instanceSummary.Id}
+						fullResponse, err := computeClient.GetInstance(context.Background(), getRequest)
+						if err != nil {
+							fmt.Printf("Error: Getting full instance details failed: %v\n", err)
+							os.Exit(1)
+						}
+						displayInstanceDetails(&fullResponse.Instance)
+						found = true
+						break // Assuming names are unique, stop after first match
+					}
+				}
+				if !found {
+					fmt.Println("No instance found with that display name in the compartment.")
+				}
+			} else {
+				fmt.Println("Error: Specify either --id or --name.")
+				os.Exit(1)
+			}
 		},
 	}
+
+	infoCmd.Flags().String("id", "", "The OCID of the instance to get info for")
+	infoCmd.Flags().String("name", "", "The display name of the instance to search for")
+	infoCmd.Flags().String("compartment-id", "", "The OCID or friendly name of the compartment (optional, defaults to tenancy if not specified)")
 
 	instancesCmd.AddCommand(listCmd, createCmd, infoCmd)
 
@@ -107,7 +191,7 @@ func main() {
 			if err != nil {
 				log.Fatal(err)
 			}
-
+			fmt.Printf("Tenancy ID: %s\n", tenancyOCID)
 			request := identity.ListCompartmentsRequest{
 				CompartmentId: &tenancyOCID,
 			}
@@ -153,7 +237,7 @@ func resolveCompartmentID(input string) (string, error) {
 		return "", err
 	}
 
-	for _, compartment := range response.Items {  
+	for _, compartment := range response.Items {
 		if *compartment.Name == input {
 			return *compartment.Id, nil // Return the OCID of the matching compartment
 		}
@@ -192,4 +276,17 @@ func listCompartmentsRecursive(client identity.IdentityClient, request *identity
 	}
 
 	return nil
+}
+
+func displayInstanceDetails(instance *core.Instance) {
+	fmt.Println("Instance Details:")
+	fmt.Printf("  ID: %s\n", *instance.Id)
+	fmt.Printf("  Display Name: %s\n", *instance.DisplayName)
+	fmt.Printf("  State: %s\n", instance.LifecycleState)
+	fmt.Printf("  Shape: %s\n", *instance.Shape)
+	fmt.Printf("  Image ID: %s\n", *instance.ImageId)
+	fmt.Printf("  Compartment ID: %s\n", *instance.CompartmentId)
+	fmt.Printf("  Availability Domain: %s\n", *instance.AvailabilityDomain)
+	fmt.Printf("  Fault Domain: %s\n", *instance.FaultDomain) // Kept if valid, but can be removed if not needed
+	// Removed SubnetId as it was undefined; consider adding VNIC details if required in future updates.
 }
